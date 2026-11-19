@@ -17,6 +17,8 @@ export interface Group {
   quorum_unanimity_max: number;
   quorum_majority_ratio: number;
   exif_tolerance_minutes: number;
+  evaluation_start_at: string | null;
+  evaluation_end_at: string | null;
   created_by: string;
   created_at: string;
 }
@@ -52,13 +54,23 @@ export interface Task {
   created_at: string;
 }
 
-export type ChangeRequestType = 'create' | 'edit' | 'delete' | 'prize_update';
+export type ChangeRequestType =
+  | 'create'
+  | 'edit'
+  | 'delete'
+  | 'prize_update'
+  | 'evaluation_period_update';
+
+export type RequestType = ChangeRequestType;
 
 export type ChangeRequestStatus =
   | 'pending'
   | 'approved'
   | 'rejected'
-  | 'counter_proposed';
+  | 'counter_proposed'
+  | 'superseded';
+
+export type RequestStatus = ChangeRequestStatus;
 
 export interface TaskProposedData {
   title?: string;
@@ -72,10 +84,16 @@ export interface PrizeProposedData {
   prize_text?: string;
 }
 
+export interface EvaluationPeriodProposedData {
+  evaluation_start_at?: string | null;
+  evaluation_end_at?: string | null;
+}
+
 export interface TaskChangeRequest {
   id: string;
   group_id: string;
   task_id: string | null;
+  parent_request_id: string | null;
   request_type: ChangeRequestType;
   proposed_data: Record<string, unknown>;
   requested_by: string;
@@ -100,7 +118,7 @@ export interface TaskChangeRequestWithVotes extends TaskChangeRequest {
   votes: TaskChangeVote[];
 }
 
-export type EvidenceType = 'photo' | 'audio';
+export type EvidenceType = 'image' | 'audio';
 export type ValidationStatus = 'valid' | 'pending_review' | 'rejected' | string;
 
 export interface TaskCompletion {

@@ -1,10 +1,12 @@
 import { useState, type FormEvent } from 'react';
 import {
+  CalendarClock,
   Check,
   Loader2,
   MessageSquarePlus,
   Pencil,
   PlusCircle,
+  RotateCcw,
   Trash2,
   Trophy,
   X,
@@ -21,7 +23,12 @@ import type {
   TaskChangeRequestWithVotes,
   VoteType,
 } from '../lib/types';
-import { formatRecurrence, formatRelativeTimeBR } from '../lib/utils';
+import {
+  formatDateTimeBR,
+  formatRecurrence,
+  formatRelativeTimeBR,
+  fromDateTimeLocalInputValue,
+} from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 import { Avatar } from './Avatar';
@@ -33,6 +40,7 @@ interface VoteCardProps {
   membersById: Record<string, Profile>;
   tasksById: Record<string, Task>;
   onVoted?: () => void;
+  onResubmit?: (request: TaskChangeRequestWithVotes) => void;
 }
 
 const REQUEST_TYPE_META: Record<
@@ -59,6 +67,11 @@ const REQUEST_TYPE_META: Record<
     colorClass: 'border-amber-500/35 bg-amber-500/15 text-amber-200',
     Icon: Trophy,
   },
+  evaluation_period_update: {
+    label: 'Período de Avaliação',
+    colorClass: 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200',
+    Icon: CalendarClock,
+  },
 };
 
 const STATUS_BADGE: Record<
@@ -78,8 +91,12 @@ const STATUS_BADGE: Record<
     classes: 'border-rose-500/35 bg-rose-500/10 text-rose-300',
   },
   counter_proposed: {
-    label: 'Contraproposta',
-    classes: 'border-amber-500/35 bg-amber-500/10 text-amber-200',
+    label: 'Devolvida com sugestão',
+    classes: 'border-amber-500/40 bg-amber-500/15 text-amber-200',
+  },
+  superseded: {
+    label: 'Substituída',
+    classes: 'border-zinc-700 bg-zinc-800 text-zinc-400',
   },
 };
 
@@ -90,6 +107,7 @@ export function VoteCard({
   membersById,
   tasksById,
   onVoted,
+  onResubmit,
 }: VoteCardProps) {
   const { user } = useAuth();
   const { showToast } = useToast();
@@ -100,6 +118,8 @@ export function VoteCard({
   const [suggestedTitle, setSuggestedTitle] = useState('');
   const [suggestedPoints, setSuggestedPoints] = useState('');
   const [suggestedPrize, setSuggestedPrize] = useState('');
+  const [suggestedEvalStart, setSuggestedEvalStart] = useState('');
+  const [suggestedEvalEnd, setSuggestedEvalEnd] = useState('');
 
   if (!user) return null;
 
@@ -119,6 +139,10 @@ export function VoteCard({
 
   const userVote = request.votes.find((v) => v.user_id === user.id);
   const canVote = request.status === 'pending' && !userVote;
+  const canResubmit =
+    request.status === 'counter_proposed' &&
+    request.requested_by === user.id &&
+    Boolean(onResubmit);
 
   const proposed = request.proposed_data ?? {};
   const existingTask = request.task_id ? tasksById[request.task_id] : undefined;
@@ -145,6 +169,14 @@ export function VoteCard({
         : existingTask?.assigned_to ?? null;
   const proposedPrize =
     typeof proposed.prize_text === 'string' ? proposed.prize_text : '';
+  const proposedEvalStart =
+    typeof proposed.evaluation_start_at === 'string'
+      ? proposed.evaluation_start_at
+      : null;
+  const proposedEvalEnd =
+    typeof proposed.evaluation_end_at === 'string'
+      ? proposed.evaluation_end_at
+      : null;
 
   const submitVote = async (
     voteType: VoteType,
@@ -178,6 +210,8 @@ export function VoteCard({
       setSuggestedTitle('');
       setSuggestedPoints('');
       setSuggestedPrize('');
+      setSuggestedEvalStart('');
+      setSuggestedEvalEnd('');
       onVoted?.();
     } finally {
       setSubmittingVote(null);
@@ -196,6 +230,22 @@ export function VoteCard({
     if (request.request_type === 'prize_update') {
       if (suggestedPrize.trim()) {
         suggestedData.prize_text = suggestedPrize.trim();
+      }
+    } else if (request.request_type === 'evaluation_period_update') {
+      const startIso = fromDateTimeLocalInputValue(suggestedEvalStart);
+      const endIso = fromDateTimeLocalInputValue(suggestedEvalEnd);
+      if (startIso) {
+        suggestedData.evaluation_start_at = startIso;
+      }
+      if (endIso) {
+        suggestedData.evaluation_end_at = endIso;
+      }
+      if (startIso && endIso && Date.parse(endIso) <= Date.parse(startIso)) {
+        showToast(
+          'O encerramento sugerido precisa ser posterior ao início.',
+          'warning'
+        );
+        return;
       }
     } else {
       if (suggestedTitle.trim()) {
@@ -219,7 +269,13 @@ export function VoteCard({
   };
 
   return (
-    <article className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-4 shadow-sm">
+    <article
+      className={`rounded-2xl border p-4 shadow-sm ${
+        canResubmit
+          ? 'border-amber-500/45 bg-zinc-900'
+          : 'border-zinc-800 bg-zinc-900/90'
+      }`}
+    >
       <div className="flex items-start justify-between gap-2">
         <span
           className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold ${typeMeta.colorClass}`}
@@ -256,6 +312,33 @@ export function VoteCard({
             {request.status === 'pending' && (
               <p className="mt-2 text-xs text-zinc-500">
                 Atual: {group.prize_text}
+              </p>
+            )}
+          </div>
+        ) : request.request_type === 'evaluation_period_update' ? (
+          <div className="space-y-1">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
+              Novo período de avaliação
+            </p>
+            {proposedEvalStart && (
+              <p className="text-xs text-zinc-300">
+                Início:{' '}
+                <strong className="text-zinc-100">
+                  {formatDateTimeBR(proposedEvalStart)}
+                </strong>
+              </p>
+            )}
+            <p className="text-sm font-semibold text-emerald-300">
+              {proposedEvalEnd
+                ? `Encerra em ${formatDateTimeBR(proposedEvalEnd)}`
+                : 'Sem data de encerramento'}
+            </p>
+            {request.status === 'pending' && (
+              <p className="pt-1 text-xs text-zinc-500">
+                Atual:{' '}
+                {group.evaluation_end_at
+                  ? formatDateTimeBR(group.evaluation_end_at)
+                  : 'Sem data de fechamento definida'}
               </p>
             )}
           </div>
@@ -334,6 +417,27 @@ export function VoteCard({
               const voterName =
                 membersById[voteItem.user_id]?.display_name ?? 'Membro';
               const sData = voteItem.suggested_data ?? {};
+              const suggestedSummary = [
+                typeof sData.title === 'string'
+                  ? `Título: ${sData.title}`
+                  : null,
+                typeof sData.points === 'number'
+                  ? `${sData.points} pts`
+                  : null,
+                typeof sData.recurrence === 'string'
+                  ? formatRecurrence(sData.recurrence)
+                  : null,
+                typeof sData.prize_text === 'string'
+                  ? `Prêmio: ${sData.prize_text}`
+                  : null,
+                typeof sData.evaluation_start_at === 'string'
+                  ? `Início: ${formatDateTimeBR(sData.evaluation_start_at)}`
+                  : null,
+                typeof sData.evaluation_end_at === 'string'
+                  ? `Fim: ${formatDateTimeBR(sData.evaluation_end_at)}`
+                  : null,
+              ].filter(Boolean);
+
               return (
                 <div
                   key={voteItem.id}
@@ -364,24 +468,9 @@ export function VoteCard({
                       “{voteItem.suggestion_note}”
                     </p>
                   )}
-                  {(typeof sData.title === 'string' ||
-                    typeof sData.points === 'number' ||
-                    typeof sData.prize_text === 'string') && (
+                  {suggestedSummary.length > 0 && (
                     <p className="mt-1 text-[11px] text-amber-300/90">
-                      Sugestão:{' '}
-                      {[
-                        typeof sData.title === 'string'
-                          ? `Título: ${sData.title}`
-                          : null,
-                        typeof sData.points === 'number'
-                          ? `${sData.points} pts`
-                          : null,
-                        typeof sData.prize_text === 'string'
-                          ? `Prêmio: ${sData.prize_text}`
-                          : null,
-                      ]
-                        .filter(Boolean)
-                        .join(' • ')}
+                      Sugestão: {suggestedSummary.join(' • ')}
                     </p>
                   )}
                 </div>
@@ -389,6 +478,17 @@ export function VoteCard({
             })}
           </div>
         </div>
+      )}
+
+      {canResubmit && onResubmit && (
+        <button
+          type="button"
+          onClick={() => onResubmit(request)}
+          className="mt-4 flex min-h-[46px] w-full items-center justify-center gap-2 rounded-xl bg-amber-400 px-4 text-xs font-bold text-zinc-950 shadow-sm hover:bg-amber-300"
+        >
+          <RotateCcw className="h-4 w-4" />
+          Corrigir e Reenviar
+        </button>
       )}
 
       {userVote && request.status === 'pending' && (
@@ -478,6 +578,39 @@ export function VoteCard({
                     placeholder="Sugerir texto alternativo"
                     className="min-h-[40px] w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 text-xs text-zinc-100 placeholder-zinc-500 outline-none focus:border-amber-400"
                   />
+                </div>
+              ) : request.request_type === 'evaluation_period_update' ? (
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div>
+                    <label
+                      htmlFor={`eval-start-${request.id}`}
+                      className="mb-1 block text-[11px] text-zinc-400"
+                    >
+                      Início sugerido (opc.)
+                    </label>
+                    <input
+                      id={`eval-start-${request.id}`}
+                      type="datetime-local"
+                      value={suggestedEvalStart}
+                      onChange={(e) => setSuggestedEvalStart(e.target.value)}
+                      className="min-h-[40px] w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs text-zinc-100 outline-none focus:border-amber-400"
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor={`eval-end-${request.id}`}
+                      className="mb-1 block text-[11px] text-zinc-400"
+                    >
+                      Fim sugerido (opc.)
+                    </label>
+                    <input
+                      id={`eval-end-${request.id}`}
+                      type="datetime-local"
+                      value={suggestedEvalEnd}
+                      onChange={(e) => setSuggestedEvalEnd(e.target.value)}
+                      className="min-h-[40px] w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 text-xs text-zinc-100 outline-none focus:border-amber-400"
+                    />
+                  </div>
                 </div>
               ) : (
                 <div className="grid grid-cols-3 gap-2">

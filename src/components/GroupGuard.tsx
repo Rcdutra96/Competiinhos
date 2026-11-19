@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Loader2, ShieldAlert } from 'lucide-react';
 import { supabase } from '../lib/supabase';
@@ -9,17 +9,19 @@ import { PrizeAgreement } from '../pages/PrizeAgreement';
 export function GroupGuard({ children }: { children: ReactNode }) {
   const { groupId } = useParams<{ groupId: string }>();
   const { user } = useAuth();
+  const userId = user?.id;
 
   const [group, setGroup] = useState<Group | null>(null);
   const [membership, setMembership] = useState<GroupMember | null>(null);
   const [loading, setLoading] = useState(true);
   const [notAllowed, setNotAllowed] = useState(false);
+  const loadedKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
 
     const loadMembership = async () => {
-      if (!groupId || !user) {
+      if (!groupId || !userId) {
         if (active) {
           setNotAllowed(true);
           setLoading(false);
@@ -27,7 +29,10 @@ export function GroupGuard({ children }: { children: ReactNode }) {
         return;
       }
 
-      setLoading(true);
+      const key = `${groupId}:${userId}`;
+      if (loadedKeyRef.current !== key) {
+        setLoading(true);
+      }
       setNotAllowed(false);
 
       const [memberRes, groupRes] = await Promise.all([
@@ -35,7 +40,7 @@ export function GroupGuard({ children }: { children: ReactNode }) {
           .from('group_members')
           .select('*')
           .eq('group_id', groupId)
-          .eq('user_id', user.id)
+          .eq('user_id', userId)
           .maybeSingle(),
         supabase.from('groups').select('*').eq('id', groupId).maybeSingle(),
       ]);
@@ -48,11 +53,13 @@ export function GroupGuard({ children }: { children: ReactNode }) {
         !memberRes.data ||
         !groupRes.data
       ) {
+        loadedKeyRef.current = null;
         setNotAllowed(true);
         setLoading(false);
         return;
       }
 
+      loadedKeyRef.current = key;
       setMembership(memberRes.data as GroupMember);
       setGroup(groupRes.data as Group);
       setLoading(false);
@@ -63,7 +70,7 @@ export function GroupGuard({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [groupId, user]);
+  }, [groupId, userId]);
 
   if (loading) {
     return (

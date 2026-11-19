@@ -2,7 +2,10 @@ import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Camera, Loader2, Trophy, X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { sanitizeFileExt } from '../lib/utils';
+import {
+  compressImageFile,
+  type CompressedImageResult,
+} from '../lib/imageCompression';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 
@@ -24,8 +27,10 @@ export function CreateGroupModal({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [prizeText, setPrizeText] = useState('');
-  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [compressedAvatar, setCompressedAvatar] =
+    useState<CompressedImageResult | null>(null);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+  const [compressingAvatar, setCompressingAvatar] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
@@ -36,12 +41,26 @@ export function CreateGroupModal({
 
   if (!open) return null;
 
-  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (avatarPreview) URL.revokeObjectURL(avatarPreview);
-    setAvatarFile(file);
-    setAvatarPreview(URL.createObjectURL(file));
+
+    setCompressingAvatar(true);
+    try {
+      const compressed = await compressImageFile(file, 512);
+      setAvatarPreview((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(compressed.blob);
+      });
+      setCompressedAvatar(compressed);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Erro ao processar a foto.';
+      showToast(msg, 'error');
+    } finally {
+      setCompressingAvatar(false);
+      e.target.value = '';
+    }
   };
 
   const resetForm = () => {
@@ -49,8 +68,9 @@ export function CreateGroupModal({
     setDescription('');
     setPrizeText('');
     if (avatarPreview) URL.revokeObjectURL(avatarPreview);
-    setAvatarFile(null);
+    setCompressedAvatar(null);
     setAvatarPreview(null);
+    setCompressingAvatar(false);
   };
 
   const handleClose = () => {
@@ -76,13 +96,12 @@ export function CreateGroupModal({
     try {
       let avatarUrl: string | null = null;
 
-      if (avatarFile) {
-        const ext = sanitizeFileExt(avatarFile.name, 'jpg');
-        const path = `${user.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+      if (compressedAvatar) {
+        const path = `${user.id}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${compressedAvatar.extension}`;
         const { error: uploadError } = await supabase.storage
           .from('group-avatars')
-          .upload(path, avatarFile, {
-            contentType: avatarFile.type || 'image/jpeg',
+          .upload(path, compressedAvatar.blob, {
+            contentType: compressedAvatar.contentType,
             upsert: false,
           });
 
@@ -172,7 +191,9 @@ export function CreateGroupModal({
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="flex items-center gap-4">
             <label className="relative flex h-20 w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-2xl border border-dashed border-zinc-700 bg-zinc-950 text-zinc-400 transition-colors hover:border-emerald-500/60 hover:text-emerald-400">
-              {avatarPreview ? (
+              {compressingAvatar ? (
+                <Loader2 className="h-5 w-5 animate-spin text-emerald-400" />
+              ) : avatarPreview ? (
                 <img
                   src={avatarPreview}
                   alt="Pré-visualização do grupo"
@@ -187,7 +208,7 @@ export function CreateGroupModal({
               <input
                 type="file"
                 accept="image/*"
-                onChange={handleFileChange}
+                onChange={(e) => void handleFileChange(e)}
                 className="sr-only"
               />
             </label>
@@ -196,6 +217,11 @@ export function CreateGroupModal({
               <p className="mt-0.5">
                 Opcional. Toque no quadrado para escolher uma imagem.
               </p>
+              {compressedAvatar && (
+                <p className="mt-1 font-medium text-emerald-400">
+                  Foto otimizada: {compressedAvatar.formattedSize}
+                </p>
+              )}
             </div>
           </div>
 
@@ -271,7 +297,7 @@ export function CreateGroupModal({
             </button>
             <button
               type="submit"
-              disabled={submitting}
+              disabled={submitting || compressingAvatar}
               className="flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 text-sm font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-60"
             >
               {submitting && <Loader2 className="h-4 w-4 animate-spin" />}

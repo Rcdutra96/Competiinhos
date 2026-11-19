@@ -1,13 +1,17 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Loader2, Trophy, X } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import type { Profile, TaskChangeRequestWithVotes } from '../lib/types';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
+import { SuggestionReviewBanner } from './SuggestionReviewBanner';
 
 interface PrizeProposalModalProps {
   open: boolean;
   groupId: string;
   currentPrizeText: string;
+  resubmitRequest?: TaskChangeRequestWithVotes | null;
+  membersById?: Record<string, Profile>;
   onClose: () => void;
   onSubmitted?: () => void;
 }
@@ -16,6 +20,8 @@ export function PrizeProposalModal({
   open,
   groupId,
   currentPrizeText,
+  resubmitRequest = null,
+  membersById = {},
   onClose,
   onSubmitted,
 }: PrizeProposalModalProps) {
@@ -25,12 +31,38 @@ export function PrizeProposalModal({
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (open) {
+    if (!open) return;
+
+    if (resubmitRequest) {
+      const p = resubmitRequest.proposed_data ?? {};
+      setPrizeText(
+        typeof p.prize_text === 'string' ? p.prize_text : currentPrizeText
+      );
+    } else {
       setPrizeText(currentPrizeText);
     }
-  }, [currentPrizeText, open]);
+  }, [currentPrizeText, open, resubmitRequest]);
 
   if (!open || !user) return null;
+
+  const latestSuggestedVote = resubmitRequest
+    ? [...resubmitRequest.votes]
+        .reverse()
+        .find(
+          (v) =>
+            v.vote === 'reject_with_suggestion' &&
+            v.suggested_data &&
+            typeof v.suggested_data.prize_text === 'string'
+        )
+    : undefined;
+
+  const handleApplySuggestion = () => {
+    const suggested = latestSuggestedVote?.suggested_data?.prize_text;
+    if (typeof suggested === 'string') {
+      setPrizeText(suggested);
+      showToast('Sugestão aplicada ao prêmio proposto.', 'info');
+    }
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -50,6 +82,7 @@ export function PrizeProposalModal({
       const { error } = await supabase.from('task_change_requests').insert({
         group_id: groupId,
         task_id: null,
+        parent_request_id: resubmitRequest?.id ?? null,
         request_type: 'prize_update',
         proposed_data: {
           prize_text: trimmed,
@@ -62,7 +95,12 @@ export function PrizeProposalModal({
         return;
       }
 
-      showToast('Sugestão de novo prêmio enviada para votação!', 'success');
+      showToast(
+        resubmitRequest
+          ? 'Proposta de prêmio corrigida e reenviada para votação!'
+          : 'Sugestão de novo prêmio enviada para votação!',
+        'success'
+      );
       onSubmitted?.();
       onClose();
     } finally {
@@ -72,12 +110,12 @@ export function PrizeProposalModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 backdrop-blur-sm sm:items-center sm:p-4">
-      <div className="pb-safe w-full max-w-lg rounded-t-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl sm:rounded-3xl">
+      <div className="pb-safe max-h-[92dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl sm:rounded-3xl">
         <div className="mb-4 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Trophy className="h-5 w-5 text-amber-400" />
             <h2 className="text-lg font-bold text-zinc-100">
-              Sugerir novo prêmio
+              {resubmitRequest ? 'Corrigir novo prêmio' : 'Sugerir novo prêmio'}
             </h2>
           </div>
           <button
@@ -90,6 +128,15 @@ export function PrizeProposalModal({
             <X className="h-5 w-5" />
           </button>
         </div>
+
+        {resubmitRequest && (
+          <SuggestionReviewBanner
+            request={resubmitRequest}
+            membersById={membersById}
+            hasSuggestedData={Boolean(latestSuggestedVote)}
+            onApplySuggestion={handleApplySuggestion}
+          />
+        )}
 
         <div className="mb-4 rounded-xl border border-zinc-800 bg-zinc-950/80 p-3">
           <p className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
@@ -133,7 +180,7 @@ export function PrizeProposalModal({
               className="flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-xl bg-amber-400 px-4 text-sm font-semibold text-zinc-950 hover:bg-amber-300 disabled:opacity-60"
             >
               {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-              Enviar proposta
+              {resubmitRequest ? 'Reenviar proposta' : 'Enviar proposta'}
             </button>
           </div>
         </form>

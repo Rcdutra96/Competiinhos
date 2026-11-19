@@ -1,18 +1,21 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   ArrowLeft,
   CheckSquare,
   ListTodo,
   Loader2,
+  Lock,
   Trophy,
   Vote,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useGroupData } from '../hooks/useGroupData';
-import type { Task } from '../lib/types';
+import type { Task, TaskChangeRequestWithVotes } from '../lib/types';
+import { isEvaluationPeriodEnded } from '../lib/utils';
 import { Avatar } from '../components/Avatar';
 import { CompletionModal } from '../components/CompletionModal';
+import { EvaluationPeriodModal } from '../components/EvaluationPeriodModal';
 import { PrizeProposalModal } from '../components/PrizeProposalModal';
 import { TaskProposalModal } from '../components/TaskProposalModal';
 import { AllTasksTab } from '../components/tabs/AllTasksTab';
@@ -21,6 +24,10 @@ import { RankingTab } from '../components/tabs/RankingTab';
 import { VotesTab } from '../components/tabs/VotesTab';
 
 type DashboardTab = 'ranking' | 'my' | 'all' | 'votes';
+
+function getCompletionStorageKey(groupId: string | undefined): string | null {
+  return groupId ? `competiinhos_open_completion_${groupId}` : null;
+}
 
 export function GroupDashboard() {
   const { groupId } = useParams<{ groupId: string }>();
@@ -36,20 +43,111 @@ export function GroupDashboard() {
     completedThisWeekTaskIds,
     completedOnceTaskIds,
     requests,
-    pendingRequestCount,
+    votesBadgeCount,
     loading,
     error,
     refresh,
   } = useGroupData(groupId, user?.id);
 
   const [activeTab, setActiveTab] = useState<DashboardTab>('my');
-  const [completionTask, setCompletionTask] = useState<Task | null>(null);
+  const [completionTaskId, setCompletionTaskId] = useState<string | null>(() => {
+    const key = getCompletionStorageKey(groupId);
+    if (!key) return null;
+    try {
+      return window.sessionStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  });
+
   const [taskModalState, setTaskModalState] = useState<{
     open: boolean;
     mode: 'create' | 'edit';
     task: Task | null;
-  }>({ open: false, mode: 'create', task: null });
-  const [prizeModalOpen, setPrizeModalOpen] = useState(false);
+    resubmitRequest: TaskChangeRequestWithVotes | null;
+  }>({ open: false, mode: 'create', task: null, resubmitRequest: null });
+
+  const [prizeModalState, setPrizeModalState] = useState<{
+    open: boolean;
+    resubmitRequest: TaskChangeRequestWithVotes | null;
+  }>({ open: false, resubmitRequest: null });
+
+  const [evalPeriodModalState, setEvalPeriodModalState] = useState<{
+    open: boolean;
+    resubmitRequest: TaskChangeRequestWithVotes | null;
+  }>({ open: false, resubmitRequest: null });
+
+  const evaluationEnded = isEvaluationPeriodEnded(group?.evaluation_end_at);
+
+  const setPersistedCompletionTaskId = useCallback(
+    (nextTaskId: string | null) => {
+      setCompletionTaskId(nextTaskId);
+      const key = getCompletionStorageKey(groupId);
+      if (!key) return;
+      try {
+        if (nextTaskId) {
+          window.sessionStorage.setItem(key, nextTaskId);
+        } else {
+          window.sessionStorage.removeItem(key);
+        }
+      } catch {
+        // Ignora indisponibilidade de sessionStorage
+      }
+    },
+    [groupId]
+  );
+
+  // Sincroniza sessionStorage se mudar de grupo
+  useEffect(() => {
+    const key = getCompletionStorageKey(groupId);
+    if (!key) {
+      setCompletionTaskId(null);
+      return;
+    }
+    try {
+      setCompletionTaskId(window.sessionStorage.getItem(key));
+    } catch {
+      setCompletionTaskId(null);
+    }
+  }, [groupId]);
+
+  useEffect(() => {
+    if (evaluationEnded && completionTaskId) {
+      setPersistedCompletionTaskId(null);
+    }
+  }, [completionTaskId, evaluationEnded, setPersistedCompletionTaskId]);
+
+  const completionTask = useMemo(() => {
+    if (evaluationEnded || !completionTaskId) return null;
+    return tasks.find((t) => t.id === completionTaskId) ?? null;
+  }, [completionTaskId, evaluationEnded, tasks]);
+
+  const handleSelectTaskForCompletion = (task: Task) => {
+    if (evaluationEnded) return;
+    setPersistedCompletionTaskId(task.id);
+  };
+
+  const handleResubmitRequest = (request: TaskChangeRequestWithVotes) => {
+    if (request.request_type === 'prize_update') {
+      setPrizeModalState({ open: true, resubmitRequest: request });
+      return;
+    }
+    if (request.request_type === 'evaluation_period_update') {
+      setEvalPeriodModalState({ open: true, resubmitRequest: request });
+      return;
+    }
+
+    const linkedTask = request.task_id
+      ? tasks.find((t) => t.id === request.task_id) ?? null
+      : null;
+
+    setTaskModalState({
+      open: true,
+      mode: request.request_type === 'create' ? 'create' : 'edit',
+      task: linkedTask,
+      resubmitRequest: request,
+    });
+  };
 
   if (loading && !group) {
     return (
@@ -115,12 +213,24 @@ export function GroupDashboard() {
         </div>
       </header>
 
-      <main className="pb-content-nav mx-auto max-w-lg px-4 pt-4">
+      <main className="pb-content-nav mx-auto max-w-lg space-y-4 px-4 pt-4">
+        {evaluationEnded && (
+          <div className="flex items-center gap-2.5 rounded-2xl border border-rose-500/40 bg-rose-500/15 px-4 py-3 text-xs font-semibold text-rose-200">
+            <Lock className="h-4 w-4 shrink-0 text-rose-400" />
+            <span>Período de avaliação encerrado — Check-ins fechados</span>
+          </div>
+        )}
+
         {activeTab === 'ranking' && (
           <RankingTab
             group={group}
             ranking={ranking}
-            onSuggestPrize={() => setPrizeModalOpen(true)}
+            onSuggestPrize={() =>
+              setPrizeModalState({ open: true, resubmitRequest: null })
+            }
+            onProposeEvaluationPeriod={() =>
+              setEvalPeriodModalState({ open: true, resubmitRequest: null })
+            }
           />
         )}
 
@@ -131,7 +241,8 @@ export function GroupDashboard() {
             completedTodayTaskIds={completedTodayTaskIds}
             completedThisWeekTaskIds={completedThisWeekTaskIds}
             completedOnceTaskIds={completedOnceTaskIds}
-            onSelectTask={(task) => setCompletionTask(task)}
+            evaluationEnded={evaluationEnded}
+            onSelectTask={handleSelectTaskForCompletion}
           />
         )}
 
@@ -142,10 +253,20 @@ export function GroupDashboard() {
             tasks={tasks}
             membersById={membersById}
             onCreateTask={() =>
-              setTaskModalState({ open: true, mode: 'create', task: null })
+              setTaskModalState({
+                open: true,
+                mode: 'create',
+                task: null,
+                resubmitRequest: null,
+              })
             }
             onEditTask={(task) =>
-              setTaskModalState({ open: true, mode: 'edit', task })
+              setTaskModalState({
+                open: true,
+                mode: 'edit',
+                task,
+                resubmitRequest: null,
+              })
             }
             onRequestSubmitted={() => void refresh()}
           />
@@ -154,11 +275,13 @@ export function GroupDashboard() {
         {activeTab === 'votes' && (
           <VotesTab
             group={group}
+            currentUserId={user.id}
             members={members}
             membersById={membersById}
             tasks={tasks}
             requests={requests}
             onVoted={() => void refresh()}
+            onResubmitRequest={handleResubmitRequest}
           />
         )}
       </main>
@@ -218,9 +341,9 @@ export function GroupDashboard() {
           >
             <div className="relative">
               <Vote className="h-5 w-5" />
-              {pendingRequestCount > 0 && (
+              {votesBadgeCount > 0 && (
                 <span className="absolute -top-1.5 -right-2.5 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-400 px-1 text-[10px] font-extrabold text-zinc-950">
-                  {pendingRequestCount > 99 ? '99+' : pendingRequestCount}
+                  {votesBadgeCount > 99 ? '99+' : votesBadgeCount}
                 </span>
               )}
             </div>
@@ -233,8 +356,11 @@ export function GroupDashboard() {
         open={completionTask !== null}
         group={group}
         task={completionTask}
-        onClose={() => setCompletionTask(null)}
-        onCompleted={() => void refresh()}
+        onClose={() => setPersistedCompletionTaskId(null)}
+        onCompleted={() => {
+          setPersistedCompletionTaskId(null);
+          void refresh();
+        }}
       />
 
       <TaskProposalModal
@@ -242,18 +368,42 @@ export function GroupDashboard() {
         mode={taskModalState.mode}
         groupId={group.id}
         members={members}
+        membersById={membersById}
         task={taskModalState.task}
+        resubmitRequest={taskModalState.resubmitRequest}
         onClose={() =>
-          setTaskModalState((prev) => ({ ...prev, open: false, task: null }))
+          setTaskModalState((prev) => ({
+            ...prev,
+            open: false,
+            task: null,
+            resubmitRequest: null,
+          }))
         }
         onSubmitted={() => void refresh()}
       />
 
       <PrizeProposalModal
-        open={prizeModalOpen}
+        open={prizeModalState.open}
         groupId={group.id}
         currentPrizeText={group.prize_text}
-        onClose={() => setPrizeModalOpen(false)}
+        resubmitRequest={prizeModalState.resubmitRequest}
+        membersById={membersById}
+        onClose={() =>
+          setPrizeModalState({ open: false, resubmitRequest: null })
+        }
+        onSubmitted={() => void refresh()}
+      />
+
+      <EvaluationPeriodModal
+        open={evalPeriodModalState.open}
+        groupId={group.id}
+        currentStartAt={group.evaluation_start_at}
+        currentEndAt={group.evaluation_end_at}
+        resubmitRequest={evalPeriodModalState.resubmitRequest}
+        membersById={membersById}
+        onClose={() =>
+          setEvalPeriodModalState({ open: false, resubmitRequest: null })
+        }
         onSubmitted={() => void refresh()}
       />
     </div>

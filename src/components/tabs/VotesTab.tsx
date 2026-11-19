@@ -1,4 +1,4 @@
-import { Scale, Vote } from 'lucide-react';
+import { RotateCcw, Scale, Vote } from 'lucide-react';
 import { calculateQuorum } from '../../lib/quorum';
 import type {
   Group,
@@ -11,20 +11,24 @@ import { VoteCard } from '../VoteCard';
 
 interface VotesTabProps {
   group: Group;
+  currentUserId: string;
   members: GroupMemberWithProfile[];
   membersById: Record<string, Profile>;
   tasks: Task[];
   requests: TaskChangeRequestWithVotes[];
   onVoted?: () => void;
+  onResubmitRequest: (request: TaskChangeRequestWithVotes) => void;
 }
 
 export function VotesTab({
   group,
+  currentUserId,
   members,
   membersById,
   tasks,
   requests,
   onVoted,
+  onResubmitRequest,
 }: VotesTabProps) {
   const quorum = calculateQuorum(group, members);
 
@@ -33,8 +37,18 @@ export function VotesTab({
     return acc;
   }, {});
 
+  const returnedToMeRequests = requests.filter(
+    (r) => r.status === 'counter_proposed' && r.requested_by === currentUserId
+  );
+
   const pendingRequests = requests.filter((r) => r.status === 'pending');
-  const historyRequests = requests.filter((r) => r.status !== 'pending');
+
+  const historyRequests = requests.filter(
+    (r) =>
+      r.status !== 'pending' &&
+      r.status !== 'superseded' &&
+      !(r.status === 'counter_proposed' && r.requested_by === currentUserId)
+  );
 
   const ratioPct = Math.round(Number(group.quorum_majority_ratio) * 100);
 
@@ -56,6 +70,29 @@ export function VotesTab({
         </p>
       </section>
 
+      {returnedToMeRequests.length > 0 && (
+        <section className="space-y-3 rounded-2xl border border-amber-500/40 bg-amber-500/5 p-3.5">
+          <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-300">
+            <RotateCcw className="h-4 w-4 text-amber-400" />
+            Devolvidas para você corrigir ({returnedToMeRequests.length})
+          </div>
+          <div className="space-y-3">
+            {returnedToMeRequests.map((req) => (
+              <VoteCard
+                key={req.id}
+                request={req}
+                group={group}
+                members={members}
+                membersById={membersById}
+                tasksById={tasksById}
+                onVoted={onVoted}
+                onResubmit={onResubmitRequest}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="space-y-3">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-amber-300">
           Pendentes ({pendingRequests.length})
@@ -68,7 +105,7 @@ export function VotesTab({
               Nenhuma votação pendente
             </p>
             <p className="mt-1 text-xs text-zinc-400">
-              Novas tarefas, edições ou sugestões de prêmio aparecerão aqui.
+              Novas tarefas, edições, prêmios ou prazos aparecerão aqui.
             </p>
           </div>
         ) : (
@@ -82,6 +119,7 @@ export function VotesTab({
                 membersById={membersById}
                 tasksById={tasksById}
                 onVoted={onVoted}
+                onResubmit={onResubmitRequest}
               />
             ))}
           </div>
@@ -103,6 +141,7 @@ export function VotesTab({
                 membersById={membersById}
                 tasksById={tasksById}
                 onVoted={onVoted}
+                onResubmit={onResubmitRequest}
               />
             ))}
           </div>

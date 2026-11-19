@@ -25,6 +25,8 @@ interface UseGroupDataResult {
   completedOnceTaskIds: Set<string>;
   requests: TaskChangeRequestWithVotes[];
   pendingRequestCount: number;
+  counterProposedForMeCount: number;
+  votesBadgeCount: number;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -48,8 +50,10 @@ export function useGroupData(
   const fetchAll = useCallback(
     async (silent = false) => {
       if (!groupId || !userId) return;
-      if (!silent) setLoading(true);
-      setError(null);
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
 
       try {
         const [
@@ -156,9 +160,15 @@ export function useGroupData(
           err instanceof Error
             ? err.message
             : 'Erro ao carregar dados do grupo.';
-        setError(message);
+        if (!silent) {
+          setError(message);
+        } else {
+          console.warn('Falha ao atualizar dados em segundo plano:', message);
+        }
       } finally {
-        setLoading(false);
+        if (!silent) {
+          setLoading(false);
+        }
       }
     },
     [groupId, userId]
@@ -290,6 +300,17 @@ export function useGroupData(
     [requests]
   );
 
+  const counterProposedForMeCount = useMemo(
+    () =>
+      requests.filter(
+        (req) =>
+          req.status === 'counter_proposed' && req.requested_by === userId
+      ).length,
+    [requests, userId]
+  );
+
+  const votesBadgeCount = pendingRequestCount + counterProposedForMeCount;
+
   const refresh = useCallback(async () => {
     await fetchAll(true);
   }, [fetchAll]);
@@ -306,6 +327,8 @@ export function useGroupData(
     completedOnceTaskIds,
     requests,
     pendingRequestCount,
+    counterProposedForMeCount,
+    votesBadgeCount,
     loading,
     error,
     refresh,

@@ -19,8 +19,13 @@ import {
   X,
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import type { Group, Task, ValidationStatus } from '../lib/types';
-import { getTodayLocalDate, sanitizeFileExt } from '../lib/utils';
+import {
+  compressImageFile,
+  compressVideoFrame,
+  type CompressedImageResult,
+} from '../lib/imageCompression';
+import type { EvidenceType, Group, Task, ValidationStatus } from '../lib/types';
+import { getTodayLocalDate } from '../lib/utils';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 
@@ -36,32 +41,78 @@ type EvidenceMode = 'camera' | 'gallery' | 'audio';
 
 const MAX_AUDIO_SECONDS = 60;
 
-function pickSupportedAudioMimeType(): { mimeType: string; ext: string } {
-  if (typeof MediaRecorder === 'undefined') {
-    return { mimeType: '', ext: 'webm' };
+const AUDIO_MIME_CANDIDATES = [
+  'audio/mp4',
+  'audio/webm;codecs=opus',
+  'audio/webm',
+  'audio/ogg',
+] as const;
+
+function pickSupportedAudioMimeType(): string {
+  if (
+    typeof MediaRecorder === 'undefined' ||
+    typeof MediaRecorder.isTypeSupported !== 'function'
+  ) {
+    return '';
   }
 
-  const candidates = [
-    { mimeType: 'audio/webm;codecs=opus', ext: 'webm' },
-    { mimeType: 'audio/webm', ext: 'webm' },
-    { mimeType: 'audio/mp4;codecs=mp4a.40.2', ext: 'm4a' },
-    { mimeType: 'audio/mp4', ext: 'm4a' },
-    { mimeType: 'audio/ogg;codecs=opus', ext: 'ogg' },
-  ];
-
-  for (const candidate of candidates) {
-    if (MediaRecorder.isTypeSupported(candidate.mimeType)) {
-      return candidate;
+  for (const candidate of AUDIO_MIME_CANDIDATES) {
+    try {
+      if (MediaRecorder.isTypeSupported(candidate)) {
+        return candidate;
+      }
+    } catch {
+      // Ignora erro de verificação em navegadores restritos
     }
   }
 
-  return { mimeType: '', ext: 'webm' };
+  return '';
+}
+
+function resolveAudioFileMeta(rawMime: string): {
+  ext: string;
+  contentType: string;
+} {
+  const lower = rawMime.toLowerCase();
+  const baseMime = lower.split(';')[0]?.trim() || '';
+
+  if (lower.includes('mp4') || lower.includes('aac') || lower.includes('m4a')) {
+    return { ext: 'm4a', contentType: baseMime || 'audio/mp4' };
+  }
+  if (lower.includes('ogg')) {
+    return { ext: 'ogg', contentType: baseMime || 'audio/ogg' };
+  }
+  return { ext: 'webm', contentType: baseMime || 'audio/webm' };
 }
 
 function formatTimer(seconds: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function describeMediaError(
+  err: unknown,
+  deviceLabel: 'câmera' | 'microfone'
+): string {
+  const name = err instanceof Error ? err.name : '';
+  const msg = err instanceof Error ? err.message.toLowerCase() : '';
+
+  if (
+    name === 'NotAllowedError' ||
+    name === 'PermissionDeniedError' ||
+    msg.includes('permission') ||
+    msg.includes('denied')
+  ) {
+    return `Permissão de ${deviceLabel} bloqueada. Libere o acesso nas configurações do navegador (ícone de cadeado na barra de endereço ou Ajustes do sistema).`;
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+    return `Nenhum(a) ${deviceLabel} foi encontrado(a) neste aparelho.`;
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return `O(a) ${deviceLabel} está em uso por outro aplicativo. Feche outros apps e tente novamente.`;
+  }
+  return `Não foi possível iniciar o(a) ${deviceLabel}. Verifique as permissões do navegador.`;
 }
 
 export function CompletionModal({
@@ -75,32 +126,63 @@ export function CompletionModal({
   const { showToast } = useToast();
 
   const [mode, setMode] = useState<EvidenceMode>('camera');
-  const [photoFile, setPhotoFile] = useState<File | null>(null);
+
+  const [cameraStarting, setCameraStarting] = useState(false);
+  const [cameraActive, setCameraActive] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [capturingFrame, setCapturingFrame] = useState(false);
+
+  const [capturedImage, setCapturedImage] =
+    useState<CompressedImageResult | null>(null);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
   const [exifTimestamp, setExifTimestamp] = useState<string | null>(null);
   const [exifNotice, setExifNotice] = useState<{
     status: ValidationStatus;
     message: string;
   } | null>(null);
-  const [parsingExif, setParsingExif] = useState(false);
+  const [processingGallery, setProcessingGallery] = useState(false);
 
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioPreviewUrl, setAudioPreviewUrl] = useState<string | null>(null);
   const [audioMimeInfo, setAudioMimeInfo] = useState<{
-    mimeType: string;
+    contentType: string;
     ext: string;
-  }>({ mimeType: 'audio/webm', ext: 'webm' });
+  }>({ contentType: 'audio/webm', ext: 'webm' });
 
   const [submitting, setSubmitting] = useState(false);
 
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioStreamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
 
-  const cleanupMedia = useCallback(() => {
+  const mountedRef = useRef(true);
+  const openRef = useRef(open);
+  const prevOpenRef = useRef(open);
+  const prevTaskIdRef = useRef<string | null>(task?.id ?? null);
+
+  openRef.current = open;
+
+  const stopCameraStream = useCallback(() => {
+    if (cameraStreamRef.current) {
+      for (const track of cameraStreamRef.current.getTracks()) {
+        track.stop();
+      }
+      cameraStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setCameraActive(false);
+    setCameraStarting(false);
+  }, []);
+
+  const stopAudioMedia = useCallback(() => {
     if (timerIntervalRef.current !== null) {
       window.clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
@@ -109,80 +191,172 @@ export function CompletionModal({
       mediaRecorderRef.current &&
       mediaRecorderRef.current.state !== 'inactive'
     ) {
-      mediaRecorderRef.current.stop();
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // Ignora erro se recorder já encerrou
+      }
     }
     mediaRecorderRef.current = null;
-    if (mediaStreamRef.current) {
-      for (const track of mediaStreamRef.current.getTracks()) {
+    if (audioStreamRef.current) {
+      for (const track of audioStreamRef.current.getTracks()) {
         track.stop();
       }
-      mediaStreamRef.current = null;
+      audioStreamRef.current = null;
     }
     setIsRecording(false);
   }, []);
 
-  const resetAll = useCallback(() => {
-    cleanupMedia();
-    setPhotoFile(null);
+  const resetEvidenceState = useCallback(() => {
+    stopCameraStream();
+    stopAudioMedia();
+    setCameraError(null);
+    setCapturingFrame(false);
+    setCapturedImage(null);
     setPhotoPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
     setExifTimestamp(null);
     setExifNotice(null);
-    setParsingExif(false);
+    setProcessingGallery(false);
     setAudioBlob(null);
     setAudioPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
     setRecordingSeconds(0);
-  }, [cleanupMedia]);
+  }, [stopAudioMedia, stopCameraStream]);
 
   useEffect(() => {
-    if (!open) {
-      resetAll();
-      setMode('camera');
-    }
-  }, [open, resetAll]);
-
-  useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      cleanupMedia();
+      mountedRef.current = false;
+      stopCameraStream();
+      stopAudioMedia();
     };
-  }, [cleanupMedia]);
+  }, [stopAudioMedia, stopCameraStream]);
+
+  // Só limpa o estado interno quando o modal realmente fecha ou troca de tarefa.
+  // Atualizações de objeto via Realtime ou foco não limpam o formulário.
+  useEffect(() => {
+    const currentTaskId = task?.id ?? null;
+    const wasOpen = prevOpenRef.current;
+    const prevTaskId = prevTaskIdRef.current;
+
+    if ((wasOpen && !open) || (open && currentTaskId !== prevTaskId)) {
+      resetEvidenceState();
+      if (!open) {
+        setMode('camera');
+      }
+    }
+
+    prevOpenRef.current = open;
+    prevTaskIdRef.current = currentTaskId;
+  }, [open, resetEvidenceState, task?.id]);
+
+  // Vincula o MediaStream ao <video> assim que o viewfinder é montado
+  useEffect(() => {
+    if (!cameraActive || !videoRef.current || !cameraStreamRef.current) return;
+    const videoEl = videoRef.current;
+    videoEl.srcObject = cameraStreamRef.current;
+    void videoEl.play().catch(() => {
+      // Alguns navegadores já iniciam com autoPlay/playsInline
+    });
+  }, [cameraActive]);
 
   if (!open || !task || !user) return null;
 
   const handleModeSwitch = (nextMode: EvidenceMode) => {
     if (submitting || nextMode === mode) return;
-    resetAll();
+    resetEvidenceState();
     setMode(nextMode);
   };
 
-  const handleCameraChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
-    setPhotoFile(file);
-    setPhotoPreviewUrl(URL.createObjectURL(file));
-    setExifTimestamp(new Date().toISOString());
-    setExifNotice({
-      status: 'valid',
-      message: 'Foto capturada na câmera ao vivo — validada automaticamente.',
-    });
+  // Chamada síncrona dentro do gesto do usuário para compatibilidade mobile
+  const handleStartCamera = () => {
+    if (cameraStarting || cameraActive || submitting) return;
+    setCameraError(null);
+
+    if (
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== 'function'
+    ) {
+      const msg =
+        'Câmera ao vivo indisponível neste navegador ou contexto sem HTTPS. Use a aba Galeria.';
+      setCameraError(msg);
+      showToast(msg, 'error');
+      return;
+    }
+
+    setCameraStarting(true);
+
+    navigator.mediaDevices
+      .getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      })
+      .then((stream) => {
+        if (!mountedRef.current || !openRef.current) {
+          for (const track of stream.getTracks()) {
+            track.stop();
+          }
+          return;
+        }
+        cameraStreamRef.current = stream;
+        setCameraStarting(false);
+        setCameraActive(true);
+      })
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        setCameraStarting(false);
+        setCameraActive(false);
+        const msg = describeMediaError(err, 'câmera');
+        setCameraError(msg);
+        showToast(msg, 'error');
+      });
+  };
+
+  const handleCapturePhoto = async () => {
+    const videoEl = videoRef.current;
+    if (!videoEl || capturingFrame) return;
+
+    setCapturingFrame(true);
+    try {
+      const compressed = await compressVideoFrame(videoEl, 1080);
+      stopCameraStream();
+
+      setPhotoPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(compressed.blob);
+      });
+      setCapturedImage(compressed);
+      setExifTimestamp(new Date().toISOString());
+      setExifNotice({
+        status: 'valid',
+        message: 'Foto capturada na câmera ao vivo — validada automaticamente.',
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'Não foi possível capturar a foto.';
+      showToast(msg, 'error');
+    } finally {
+      setCapturingFrame(false);
+    }
   };
 
   const handleGalleryChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (photoPreviewUrl) URL.revokeObjectURL(photoPreviewUrl);
-    setPhotoFile(file);
-    setPhotoPreviewUrl(URL.createObjectURL(file));
-    setParsingExif(true);
+
+    setProcessingGallery(true);
     setExifNotice(null);
     setExifTimestamp(null);
 
+    let nextExifTimestamp: string | null = null;
+    let nextNotice: { status: ValidationStatus; message: string };
+
+    // Ordem obrigatória: ler EXIF no arquivo original ANTES da compressão em canvas
     try {
       const exifData = (await exifr.parse(file, ['DateTimeOriginal'])) as
         | { DateTimeOriginal?: unknown }
@@ -190,55 +364,66 @@ export function CompletionModal({
       const rawDto = exifData?.DateTimeOriginal;
 
       if (!rawDto) {
-        setExifTimestamp(null);
-        setExifNotice({
+        nextNotice = {
           status: 'pending_review',
           message:
             'Foto sem metadados EXIF (DateTimeOriginal). Será enviada para revisão (pending_review) e não somará pontos imediatamente.',
-        });
-        return;
-      }
-
-      const dtoDate =
-        rawDto instanceof Date ? rawDto : new Date(String(rawDto));
-
-      if (Number.isNaN(dtoDate.getTime())) {
-        setExifTimestamp(null);
-        setExifNotice({
-          status: 'pending_review',
-          message:
-            'Data EXIF inválida nesta foto. Será enviada para revisão (pending_review).',
-        });
-        return;
-      }
-
-      const isoDto = dtoDate.toISOString();
-      setExifTimestamp(isoDto);
-
-      const diffMs = Math.abs(Date.now() - dtoDate.getTime());
-      const diffMinutes = Math.round(diffMs / 60_000);
-      const toleranceMinutes = group.exif_tolerance_minutes;
-
-      if (diffMs <= toleranceMinutes * 60_000) {
-        setExifNotice({
-          status: 'valid',
-          message: `EXIF válido (${diffMinutes} min de diferença; limite de ${toleranceMinutes} min).`,
-        });
+        };
       } else {
-        setExifNotice({
-          status: 'pending_review',
-          message: `Foto tirada há ${diffMinutes} min (limite do grupo: ${toleranceMinutes} min). Será salva como pendente de revisão.`,
-        });
+        const dtoDate =
+          rawDto instanceof Date ? rawDto : new Date(String(rawDto));
+
+        if (Number.isNaN(dtoDate.getTime())) {
+          nextNotice = {
+            status: 'pending_review',
+            message:
+              'Data EXIF inválida nesta foto. Será enviada para revisão (pending_review).',
+          };
+        } else {
+          nextExifTimestamp = dtoDate.toISOString();
+          const diffMs = Math.abs(Date.now() - dtoDate.getTime());
+          const diffMinutes = Math.round(diffMs / 60_000);
+          const toleranceMinutes = group.exif_tolerance_minutes;
+
+          if (diffMs <= toleranceMinutes * 60_000) {
+            nextNotice = {
+              status: 'valid',
+              message: `EXIF válido (${diffMinutes} min de diferença; limite de ${toleranceMinutes} min).`,
+            };
+          } else {
+            nextNotice = {
+              status: 'pending_review',
+              message: `Foto tirada há ${diffMinutes} min (limite do grupo: ${toleranceMinutes} min). Será salva como pendente de revisão.`,
+            };
+          }
+        }
       }
     } catch {
-      setExifTimestamp(null);
-      setExifNotice({
+      nextNotice = {
         status: 'pending_review',
         message:
           'Não foi possível ler os dados EXIF desta foto. Será enviada como pendente de revisão.',
+      };
+    }
+
+    try {
+      const compressed = await compressImageFile(file, 1080);
+      setPhotoPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(compressed.blob);
       });
+      setCapturedImage(compressed);
+      setExifTimestamp(nextExifTimestamp);
+      setExifNotice(nextNotice);
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Não foi possível processar a imagem da galeria.';
+      showToast(msg, 'error');
     } finally {
-      setParsingExif(false);
+      setProcessingGallery(false);
+      e.target.value = '';
     }
   };
 
@@ -251,94 +436,123 @@ export function CompletionModal({
       mediaRecorderRef.current &&
       mediaRecorderRef.current.state !== 'inactive'
     ) {
-      mediaRecorderRef.current.stop();
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // Ignora erro caso já parado
+      }
     }
     setIsRecording(false);
   };
 
-  const startRecording = async () => {
+  // Handler NÃO-async: getUserMedia precisa ser a primeira chamada síncrona no gesto do iOS Safari
+  const handleStartRecording = () => {
+    if (isRecording || submitting) return;
+
     if (
       !navigator.mediaDevices ||
       typeof navigator.mediaDevices.getUserMedia !== 'function' ||
       typeof MediaRecorder === 'undefined'
     ) {
       showToast(
-        'Gravação de áudio não é suportada neste navegador.',
+        'Gravação de áudio não é suportada neste navegador ou requer conexão HTTPS.',
         'error'
       );
       return;
     }
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaStreamRef.current = stream;
-
-      const picked = pickSupportedAudioMimeType();
-      const recorder = picked.mimeType
-        ? new MediaRecorder(stream, { mimeType: picked.mimeType })
-        : new MediaRecorder(stream);
-
-      const actualMime =
-        recorder.mimeType || picked.mimeType || 'audio/webm';
-      const actualExt = actualMime.includes('mp4')
-        ? 'm4a'
-        : actualMime.includes('ogg')
-          ? 'ogg'
-          : picked.ext;
-
-      setAudioMimeInfo({ mimeType: actualMime, ext: actualExt });
-      chunksRef.current = [];
-      setAudioBlob(null);
-      if (audioPreviewUrl) {
-        URL.revokeObjectURL(audioPreviewUrl);
-        setAudioPreviewUrl(null);
-      }
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
-      };
-
-      recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: actualMime });
-        if (blob.size > 0) {
-          setAudioBlob(blob);
-          setAudioPreviewUrl(URL.createObjectURL(blob));
-        }
-        if (mediaStreamRef.current) {
-          for (const track of mediaStreamRef.current.getTracks()) {
+    navigator.mediaDevices
+      .getUserMedia({ audio: true })
+      .then((stream) => {
+        if (!mountedRef.current || !openRef.current) {
+          for (const track of stream.getTracks()) {
             track.stop();
           }
-          mediaStreamRef.current = null;
+          return;
         }
-      };
 
-      mediaRecorderRef.current = recorder;
-      recorder.start(250);
-      setIsRecording(true);
-      setRecordingSeconds(0);
+        audioStreamRef.current = stream;
 
-      timerIntervalRef.current = window.setInterval(() => {
-        setRecordingSeconds((prev) => {
-          const next = prev + 1;
-          if (next >= MAX_AUDIO_SECONDS) {
-            stopRecording();
+        const preferredMime = pickSupportedAudioMimeType();
+        let recorder: MediaRecorder;
+        if (preferredMime) {
+          try {
+            recorder = new MediaRecorder(stream, { mimeType: preferredMime });
+          } catch {
+            recorder = new MediaRecorder(stream);
           }
-          return next;
+        } else {
+          recorder = new MediaRecorder(stream);
+        }
+
+        chunksRef.current = [];
+        setAudioBlob(null);
+        setAudioPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return null;
         });
-      }, 1000);
-    } catch {
-      showToast(
-        'Permissão de microfone negada ou dispositivo indisponível.',
-        'error'
-      );
-    }
+
+        recorder.ondataavailable = (event) => {
+          if (event.data && event.data.size > 0) {
+            chunksRef.current.push(event.data);
+          }
+        };
+
+        recorder.onstop = () => {
+          const firstChunkType =
+            chunksRef.current[0] instanceof Blob
+              ? chunksRef.current[0].type
+              : '';
+          const resolvedMime =
+            recorder.mimeType || firstChunkType || preferredMime || '';
+          const meta = resolveAudioFileMeta(resolvedMime);
+          const blob = new Blob(chunksRef.current, { type: meta.contentType });
+
+          if (audioStreamRef.current) {
+            for (const track of audioStreamRef.current.getTracks()) {
+              track.stop();
+            }
+            audioStreamRef.current = null;
+          }
+
+          if (!mountedRef.current) return;
+
+          if (blob.size > 0) {
+            setAudioMimeInfo(meta);
+            setAudioBlob(blob);
+            setAudioPreviewUrl(URL.createObjectURL(blob));
+          } else {
+            showToast(
+              'O áudio gravado ficou vazio. Tente gravar novamente.',
+              'warning'
+            );
+          }
+        };
+
+        mediaRecorderRef.current = recorder;
+        recorder.start();
+        setIsRecording(true);
+        setRecordingSeconds(0);
+
+        timerIntervalRef.current = window.setInterval(() => {
+          setRecordingSeconds((prev) => {
+            const next = prev + 1;
+            if (next >= MAX_AUDIO_SECONDS) {
+              stopRecording();
+            }
+            return next;
+          });
+        }, 1000);
+      })
+      .catch((err) => {
+        if (!mountedRef.current) return;
+        showToast(describeMediaError(err, 'microfone'), 'error');
+      });
   };
 
   const handleSubmit = async () => {
-    if (mode !== 'audio' && !photoFile) {
-      showToast('Selecione ou tire uma foto como evidência.', 'warning');
+    if (mode !== 'audio' && !capturedImage) {
+      showToast('Tire uma foto ou escolha da galeria como evidência.', 'warning');
       return;
     }
     if (mode === 'audio' && !audioBlob) {
@@ -351,18 +565,17 @@ export function CompletionModal({
       const rand = Math.random().toString(36).slice(2, 8);
       const timestamp = Date.now();
       let storagePath = '';
-      let uploadBody: File | Blob;
+      let uploadBody: Blob;
       let contentType = '';
 
       if (mode === 'audio' && audioBlob) {
         storagePath = `${user.id}/${group.id}/${timestamp}-${rand}.${audioMimeInfo.ext}`;
         uploadBody = audioBlob;
-        contentType = audioMimeInfo.mimeType || 'audio/webm';
-      } else if (photoFile) {
-        const ext = sanitizeFileExt(photoFile.name, 'jpg');
-        storagePath = `${user.id}/${group.id}/${timestamp}-${rand}.${ext}`;
-        uploadBody = photoFile;
-        contentType = photoFile.type || 'image/jpeg';
+        contentType = audioMimeInfo.contentType;
+      } else if (capturedImage) {
+        storagePath = `${user.id}/${group.id}/${timestamp}-${rand}.${capturedImage.extension}`;
+        uploadBody = capturedImage.blob;
+        contentType = capturedImage.contentType;
       } else {
         return;
       }
@@ -388,6 +601,8 @@ export function CompletionModal({
           ? (exifNotice?.status ?? 'pending_review')
           : 'valid';
 
+      const evidenceType: EvidenceType = mode === 'audio' ? 'audio' : 'image';
+
       const { error: insertError } = await supabase
         .from('task_completions')
         .insert({
@@ -395,7 +610,7 @@ export function CompletionModal({
           task_id: task.id,
           user_id: user.id,
           completion_date: getTodayLocalDate(),
-          evidence_type: mode === 'audio' ? 'audio' : 'photo',
+          evidence_type: evidenceType,
           evidence_url: publicUrlData.publicUrl,
           exif_timestamp: mode === 'audio' ? null : exifTimestamp,
           validation_status: validationStatus,
@@ -404,7 +619,7 @@ export function CompletionModal({
 
       if (insertError) {
         if (insertError.code === '23505') {
-          showToast('Você já concluiu esta tarefa hoje!', 'warning');
+          showToast('Você já concluiu esta tarefa neste período!', 'warning');
         } else {
           showToast(
             `Erro ao registrar conclusão: ${insertError.message}`,
@@ -435,9 +650,11 @@ export function CompletionModal({
 
   const canSubmit =
     !submitting &&
-    !parsingExif &&
+    !processingGallery &&
+    !capturingFrame &&
+    !cameraActive &&
     !isRecording &&
-    ((mode !== 'audio' && photoFile !== null) ||
+    ((mode !== 'audio' && capturedImage !== null) ||
       (mode === 'audio' && audioBlob !== null));
 
   return (
@@ -458,7 +675,11 @@ export function CompletionModal({
           <button
             type="button"
             onClick={() => {
-              if (!submitting) onClose();
+              if (!submitting) {
+                stopCameraStream();
+                stopAudioMedia();
+                onClose();
+              }
             }}
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
             aria-label="Fechar modal"
@@ -508,53 +729,129 @@ export function CompletionModal({
 
         {mode === 'camera' && (
           <div className="space-y-3">
-            <label className="flex min-h-[140px] cursor-pointer flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed border-zinc-700 bg-zinc-950/70 p-4 text-center transition-colors hover:border-emerald-500/60">
-              {photoPreviewUrl ? (
+            {cameraActive ? (
+              <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-black p-2.5">
+                <video
+                  ref={videoRef}
+                  playsInline
+                  muted
+                  autoPlay
+                  className="aspect-[3/4] max-h-72 w-full rounded-xl bg-black object-cover"
+                />
+                <div className="mt-2.5 flex gap-2">
+                  <button
+                    type="button"
+                    disabled={capturingFrame}
+                    onClick={stopCameraStream}
+                    className="min-h-[46px] flex-1 rounded-xl border border-zinc-700 bg-zinc-800 px-3 text-xs font-semibold text-zinc-200 hover:bg-zinc-700"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    disabled={capturingFrame}
+                    onClick={() => void handleCapturePhoto()}
+                    className="flex min-h-[46px] flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-500 px-3 text-xs font-bold text-zinc-950 hover:bg-emerald-400 disabled:opacity-60"
+                  >
+                    {capturingFrame ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Camera className="h-4 w-4" />
+                    )}
+                    Capturar
+                  </button>
+                </div>
+              </div>
+            ) : photoPreviewUrl && capturedImage ? (
+              <div className="space-y-2.5 rounded-2xl border border-zinc-800 bg-zinc-950/70 p-3">
                 <img
                   src={photoPreviewUrl}
-                  alt="Prévia da foto"
+                  alt="Prévia da foto capturada"
                   className="max-h-64 w-full rounded-xl object-contain"
                 />
-              ) : (
-                <div className="flex flex-col items-center gap-2 text-zinc-400">
-                  <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-400">
-                    <Camera className="h-6 w-6" />
-                  </div>
-                  <p className="text-sm font-semibold text-zinc-200">
-                    Abrir câmera e tirar foto
-                  </p>
-                  <p className="text-xs text-zinc-500">
-                    Fotos tiradas na hora são validadas automaticamente
-                  </p>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="inline-flex items-center rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                    Foto otimizada: {capturedImage.formattedSize}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCapturedImage(null);
+                      setExifTimestamp(null);
+                      setExifNotice(null);
+                      setPhotoPreviewUrl((prev) => {
+                        if (prev) URL.revokeObjectURL(prev);
+                        return null;
+                      });
+                      handleStartCamera();
+                    }}
+                    className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-800 px-3 text-xs font-medium text-zinc-200 hover:bg-zinc-700"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Tirar outra foto
+                  </button>
                 </div>
-              )}
-              <input
-                type="file"
-                accept="image/*"
-                capture="environment"
-                onChange={handleCameraChange}
-                className="sr-only"
-              />
-            </label>
+              </div>
+            ) : (
+              <div className="flex min-h-[160px] flex-col items-center justify-center rounded-2xl border border-dashed border-zinc-700 bg-zinc-950/70 p-4 text-center">
+                <div className="mb-2 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/15 text-emerald-400">
+                  {cameraStarting ? (
+                    <Loader2 className="h-6 w-6 animate-spin" />
+                  ) : (
+                    <Camera className="h-6 w-6" />
+                  )}
+                </div>
+                <p className="text-sm font-semibold text-zinc-200">
+                  Câmera integrada no app
+                </p>
+                <p className="mt-0.5 text-xs text-zinc-500">
+                  Fotos tiradas ao vivo são otimizadas e validadas
+                  automaticamente
+                </p>
+                <button
+                  type="button"
+                  disabled={cameraStarting}
+                  onClick={handleStartCamera}
+                  className="mt-3.5 flex min-h-[46px] items-center justify-center gap-2 rounded-xl bg-emerald-500 px-5 text-sm font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-60"
+                >
+                  <Camera className="h-4 w-4" />
+                  {cameraStarting ? 'Abrindo câmera...' : 'Tirar Foto'}
+                </button>
+              </div>
+            )}
+
+            {cameraError && (
+              <div className="flex items-start gap-2.5 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs leading-relaxed text-rose-200">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+                <p>{cameraError}</p>
+              </div>
+            )}
           </div>
         )}
 
         {mode === 'gallery' && (
           <div className="space-y-3">
-            <label className="flex min-h-[140px] cursor-pointer flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed border-zinc-700 bg-zinc-950/70 p-4 text-center transition-colors hover:border-amber-500/60">
-              {photoPreviewUrl ? (
-                <img
-                  src={photoPreviewUrl}
-                  alt="Prévia da galeria"
-                  className="max-h-64 w-full rounded-xl object-contain"
-                />
+            <label className="flex min-h-[150px] cursor-pointer flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed border-zinc-700 bg-zinc-950/70 p-4 text-center transition-colors hover:border-amber-500/60">
+              {photoPreviewUrl && capturedImage ? (
+                <div className="w-full space-y-2.5">
+                  <img
+                    src={photoPreviewUrl}
+                    alt="Prévia da galeria"
+                    className="max-h-64 w-full rounded-xl object-contain"
+                  />
+                  <div className="flex justify-center">
+                    <span className="inline-flex items-center rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
+                      Foto otimizada: {capturedImage.formattedSize}
+                    </span>
+                  </div>
+                </div>
               ) : (
                 <div className="flex flex-col items-center gap-2 text-zinc-400">
                   <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/15 text-amber-400">
                     <Upload className="h-6 w-6" />
                   </div>
                   <p className="text-sm font-semibold text-zinc-200">
-                    Escolher foto da galeria
+                    Escolher da Galeria
                   </p>
                   <p className="text-xs text-zinc-500">
                     Tolerância EXIF do grupo: {group.exif_tolerance_minutes}{' '}
@@ -570,10 +867,10 @@ export function CompletionModal({
               />
             </label>
 
-            {parsingExif && (
+            {processingGallery && (
               <div className="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-zinc-300">
                 <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
-                Verificando data original (EXIF) da imagem...
+                Lendo metadados EXIF e otimizando imagem...
               </div>
             )}
           </div>
@@ -592,18 +889,19 @@ export function CompletionModal({
                 }`}
               />
               <span className="font-mono text-xl font-bold text-zinc-100">
-                {formatTimer(recordingSeconds)} / {formatTimer(MAX_AUDIO_SECONDS)}
+                {formatTimer(recordingSeconds)} /{' '}
+                {formatTimer(MAX_AUDIO_SECONDS)}
               </span>
             </div>
 
             {!isRecording && !audioPreviewUrl && (
               <button
                 type="button"
-                onClick={() => void startRecording()}
+                onClick={handleStartRecording}
                 className="mx-auto flex min-h-[48px] items-center justify-center gap-2 rounded-xl bg-emerald-500 px-5 text-sm font-semibold text-zinc-950 hover:bg-emerald-400"
               >
                 <Mic className="h-4 w-4" />
-                Iniciar gravação
+                Gravar Áudio
               </button>
             )}
 
@@ -620,11 +918,7 @@ export function CompletionModal({
 
             {audioPreviewUrl && !isRecording && (
               <div className="space-y-3">
-                <audio
-                  controls
-                  src={audioPreviewUrl}
-                  className="w-full"
-                />
+                <audio controls src={audioPreviewUrl} className="w-full" />
                 <button
                   type="button"
                   onClick={() => {
@@ -668,7 +962,11 @@ export function CompletionModal({
         <div className="mt-5 flex gap-2.5">
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => {
+              stopCameraStream();
+              stopAudioMedia();
+              onClose();
+            }}
             disabled={submitting}
             className="min-h-[48px] flex-1 rounded-xl border border-zinc-700 bg-zinc-800/70 px-4 text-sm font-medium text-zinc-200 hover:bg-zinc-800"
           >

@@ -131,3 +131,33 @@ export function sanitizeFileExt(fileName: string, fallback: string): string {
   const raw = parts[parts.length - 1].toLowerCase().replace(/[^a-z0-9]/g, '');
   return raw || fallback;
 }
+
+export function toDateTimeLocalInputValue(
+  iso: string | null | undefined
+): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+export function fromDateTimeLocalInputValue(localStr: string): string | null {
+  const trimmed = localStr.trim();
+  if (!trimmed) return null;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+export function isEvaluationPeriodEnded(
+  evaluationEndAt: string | null | undefined
+): boolean {
+  if (!evaluationEndAt) return false;
+  const endMs = Date.parse(evaluationEndAt);
+  return !Number.isNaN(endMs) && endMs < Date.now();
+}

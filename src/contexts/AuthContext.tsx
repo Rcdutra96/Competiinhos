@@ -77,10 +77,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       if (!mounted) return;
       setSession(nextSession);
-      setUser(nextSession?.user ?? null);
+      const nextUser = nextSession?.user ?? null;
+      setUser((prev) =>
+        prev &&
+        nextUser &&
+        prev.id === nextUser.id &&
+        prev.updated_at === nextUser.updated_at
+          ? prev
+          : nextUser
+      );
 
-      if (nextSession?.user) {
-        void loadProfile(nextSession.user.id);
+      if (nextUser) {
+        void loadProfile(nextUser.id);
       } else {
         setProfile(null);
       }

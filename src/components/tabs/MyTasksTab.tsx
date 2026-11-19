@@ -15,6 +15,7 @@ interface MyTasksTabProps {
   completedTodayTaskIds: Set<string>;
   completedThisWeekTaskIds: Set<string>;
   completedOnceTaskIds: Set<string>;
+  evaluationEnded: boolean;
   onSelectTask: (task: Task) => void;
 }
 
@@ -24,6 +25,7 @@ export function MyTasksTab({
   completedTodayTaskIds,
   completedThisWeekTaskIds,
   completedOnceTaskIds,
+  evaluationEnded,
   onSelectTask,
 }: MyTasksTabProps) {
   const myTasks = tasks.filter(
@@ -83,12 +85,18 @@ export function MyTasksTab({
               <button
                 key={task.id}
                 type="button"
-                disabled={done}
-                onClick={() => onSelectTask(task)}
+                disabled={done || evaluationEnded}
+                onClick={() => {
+                  if (!evaluationEnded && !done) {
+                    onSelectTask(task);
+                  }
+                }}
                 className={`w-full rounded-2xl border p-4 text-left transition-all ${
                   done
                     ? 'cursor-default border-emerald-500/25 bg-emerald-500/5 opacity-80'
-                    : 'border-zinc-800 bg-zinc-900/90 hover:border-emerald-500/40 active:scale-[0.99]'
+                    : evaluationEnded
+                      ? 'cursor-not-allowed border-zinc-800/80 bg-zinc-900/50 opacity-60'
+                      : 'border-zinc-800 bg-zinc-900/90 hover:border-emerald-500/40 active:scale-[0.99]'
                 }`}
               >
                 <div className="flex items-start gap-3">
