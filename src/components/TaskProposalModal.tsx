@@ -46,7 +46,11 @@ export function TaskProposalModal({
       setTitle(task.title);
       setDescription(task.description ?? '');
       setPoints(String(task.points));
-      setRecurrence(task.recurrence);
+      const validRecurrence: TaskRecurrence =
+        task.recurrence === 'weekly' || task.recurrence === 'once'
+          ? task.recurrence
+          : 'daily';
+      setRecurrence(validRecurrence);
       if (task.assigned_to && task.assigned_to === user?.id) {
         setAssignedTo(KEEP_SELF_ASSIGNED);
       } else {
@@ -231,7 +235,7 @@ export function TaskProposalModal({
               <select
                 id="task-recurrence"
                 value={recurrence}
-                onChange={(e) => setRecurrence(e.target.value)}
+                onChange={(e) => setRecurrence(e.target.value as TaskRecurrence)}
                 className="min-h-[46px] w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 text-sm text-zinc-100 outline-none focus:border-emerald-500"
               >
                 <option value="daily">Diária</option>

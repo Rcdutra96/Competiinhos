@@ -37,7 +37,7 @@ export interface GroupMembershipWithGroup extends GroupMember {
   groups: Group | null;
 }
 
-export type TaskRecurrence = 'daily' | 'weekly' | 'once' | string;
+export type TaskRecurrence = 'daily' | 'weekly' | 'once';
 
 export interface Task {
   id: string;

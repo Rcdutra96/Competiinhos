@@ -11,7 +11,7 @@ import type {
   TaskChangeVote,
   TaskCompletion,
 } from '../lib/types';
-import { getTodayLocalDate } from '../lib/utils';
+import { getTodayLocalDate, isDateInCurrentWeek } from '../lib/utils';
 
 interface UseGroupDataResult {
   group: Group | null;
@@ -21,6 +21,7 @@ interface UseGroupDataResult {
   tasks: Task[];
   userCompletions: TaskCompletion[];
   completedTodayTaskIds: Set<string>;
+  completedThisWeekTaskIds: Set<string>;
   completedOnceTaskIds: Set<string>;
   requests: TaskChangeRequestWithVotes[];
   pendingRequestCount: number;
@@ -251,23 +252,38 @@ export function useGroupData(
 
   const today = getTodayLocalDate();
 
+  const validCompletions = useMemo(
+    () => userCompletions.filter((c) => c.validation_status !== 'rejected'),
+    [userCompletions]
+  );
+
   const completedTodayTaskIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const completion of userCompletions) {
+    for (const completion of validCompletions) {
       if (completion.completion_date === today) {
         ids.add(completion.task_id);
       }
     }
     return ids;
-  }, [today, userCompletions]);
+  }, [today, validCompletions]);
+
+  const completedThisWeekTaskIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const completion of validCompletions) {
+      if (isDateInCurrentWeek(completion.completion_date)) {
+        ids.add(completion.task_id);
+      }
+    }
+    return ids;
+  }, [validCompletions]);
 
   const completedOnceTaskIds = useMemo(() => {
     const ids = new Set<string>();
-    for (const completion of userCompletions) {
+    for (const completion of validCompletions) {
       ids.add(completion.task_id);
     }
     return ids;
-  }, [userCompletions]);
+  }, [validCompletions]);
 
   const pendingRequestCount = useMemo(
     () => requests.filter((req) => req.status === 'pending').length,
@@ -286,6 +302,7 @@ export function useGroupData(
     tasks,
     userCompletions,
     completedTodayTaskIds,
+    completedThisWeekTaskIds,
     completedOnceTaskIds,
     requests,
     pendingRequestCount,

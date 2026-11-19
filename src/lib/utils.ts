@@ -6,6 +6,46 @@ export function getTodayLocalDate(): string {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * Retorna a segunda-feira da semana da data local no formato YYYY-MM-DD
+ * (mesma lógica do date_trunc('week') do PostgreSQL, semana de segunda a domingo).
+ */
+export function getStartOfWeekLocalDate(d = new Date()): string {
+  const date = new Date(d);
+  const day = date.getDay();
+  const diff = (day + 6) % 7; // 0 para segunda, 6 para domingo
+  date.setDate(date.getDate() - diff);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const dayStr = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${dayStr}`;
+}
+
+/**
+ * Retorna o domingo da semana da data local no formato YYYY-MM-DD.
+ */
+export function getEndOfWeekLocalDate(d = new Date()): string {
+  const date = new Date(d);
+  const day = date.getDay();
+  const diff = (day + 6) % 7;
+  date.setDate(date.getDate() - diff + 6);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const dayStr = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${dayStr}`;
+}
+
+/**
+ * Verifica se a data de conclusão está dentro da semana atual (segunda a domingo).
+ */
+export function isDateInCurrentWeek(dateStr: string): boolean {
+  if (!dateStr) return false;
+  const dateOnly = dateStr.slice(0, 10);
+  const startOfWeek = getStartOfWeekLocalDate();
+  const endOfWeek = getEndOfWeekLocalDate();
+  return dateOnly >= startOfWeek && dateOnly <= endOfWeek;
+}
+
 export function formatDateTimeBR(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;

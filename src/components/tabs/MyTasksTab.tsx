@@ -13,6 +13,7 @@ interface MyTasksTabProps {
   tasks: Task[];
   currentUserId: string;
   completedTodayTaskIds: Set<string>;
+  completedThisWeekTaskIds: Set<string>;
   completedOnceTaskIds: Set<string>;
   onSelectTask: (task: Task) => void;
 }
@@ -21,6 +22,7 @@ export function MyTasksTab({
   tasks,
   currentUserId,
   completedTodayTaskIds,
+  completedThisWeekTaskIds,
   completedOnceTaskIds,
   onSelectTask,
 }: MyTasksTabProps) {
@@ -31,6 +33,9 @@ export function MyTasksTab({
   const isTaskDone = (task: Task) => {
     if (task.recurrence === 'once') {
       return completedOnceTaskIds.has(task.id);
+    }
+    if (task.recurrence === 'weekly') {
+      return completedThisWeekTaskIds.has(task.id);
     }
     return completedTodayTaskIds.has(task.id);
   };
@@ -44,7 +49,7 @@ export function MyTasksTab({
       <section className="rounded-2xl border border-zinc-800 bg-zinc-900/90 p-4">
         <div className="flex items-center justify-between text-xs">
           <span className="font-semibold text-zinc-300">
-            Progresso de hoje
+            Suas metas ativas
           </span>
           <span className="font-bold text-emerald-400">
             {completedCount} / {myTasks.length} concluídas
@@ -129,7 +134,11 @@ export function MyTasksTab({
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950/80 px-2 py-0.5 text-zinc-400">
                           <Users className="h-3 w-3" />
-                          Diária do grupo
+                          {task.recurrence === 'weekly'
+                            ? 'Semanal do grupo'
+                            : task.recurrence === 'once'
+                              ? 'Meta única do grupo'
+                              : 'Diária do grupo'}
                         </span>
                       )}
 
@@ -137,7 +146,9 @@ export function MyTasksTab({
                         <span className="ml-auto font-semibold text-emerald-400">
                           {task.recurrence === 'once'
                             ? 'Concluída'
-                            : 'Concluída hoje'}
+                            : task.recurrence === 'weekly'
+                              ? 'Concluída esta semana'
+                              : 'Concluída hoje'}
                         </span>
                       )}
                     </div>

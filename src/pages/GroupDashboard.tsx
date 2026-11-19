@@ -33,6 +33,7 @@ export function GroupDashboard() {
     ranking,
     tasks,
     completedTodayTaskIds,
+    completedThisWeekTaskIds,
     completedOnceTaskIds,
     requests,
     pendingRequestCount,
@@ -128,6 +129,7 @@ export function GroupDashboard() {
             tasks={tasks}
             currentUserId={user.id}
             completedTodayTaskIds={completedTodayTaskIds}
+            completedThisWeekTaskIds={completedThisWeekTaskIds}
             completedOnceTaskIds={completedOnceTaskIds}
             onSelectTask={(task) => setCompletionTask(task)}
           />
