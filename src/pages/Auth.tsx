@@ -1,7 +1,15 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ChangeEvent } from 'react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { CheckCircle2, Loader2, Trophy } from 'lucide-react';
+import { Eye, EyeOff, KeyRound, Loader2, Trophy, User, XCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
+import {
+  clearLastNick,
+  getLastNick,
+  nicknameToSlug,
+  pinToPassword,
+  setLastNick,
+  slugToEmail,
+} from '../lib/authStorage';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
 
@@ -10,22 +18,16 @@ type AuthMode = 'login' | 'signup';
 function translateAuthError(message: string): string {
   const lower = message.toLowerCase();
   if (lower.includes('invalid login credentials')) {
-    return 'E-mail ou senha incorretos.';
-  }
-  if (lower.includes('email not confirmed')) {
-    return 'Confirme seu e-mail antes de entrar.';
+    return 'Apelido ou PIN incorretos.';
   }
   if (lower.includes('user already registered')) {
-    return 'Este e-mail já está cadastrado.';
-  }
-  if (lower.includes('password should be at least')) {
-    return 'A senha precisa ter pelo menos 6 caracteres.';
-  }
-  if (lower.includes('unable to validate email address')) {
-    return 'Informe um endereço de e-mail válido.';
+    return 'Esse apelido já está em uso. Tente entrar ou escolha outro.';
   }
   if (lower.includes('rate limit')) {
     return 'Muitas tentativas seguidas. Aguarde alguns instantes.';
+  }
+  if (lower.includes('email not confirmed')) {
+    return 'Acesso pendente de confirmação.';
   }
   return message;
 }
@@ -37,58 +39,93 @@ export function Auth() {
   const location = useLocation();
 
   const [mode, setMode] = useState<AuthMode>('login');
-  const [displayName, setDisplayName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [nickname, setNickname] = useState('');
+  const [hasSavedNick, setHasSavedNick] = useState(false);
+  const [pin, setPin] = useState('');
+  const [showPin, setShowPin] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [signupEmailSent, setSignupEmailSent] = useState(false);
+
+  const pinInputRef = useRef<HTMLInputElement>(null);
 
   const fromState = (location.state as { from?: { pathname?: string } } | null)
     ?.from?.pathname;
+
+  // Carrega apelido salvo do cookie
+  useEffect(() => {
+    const saved = getLastNick();
+    if (saved) {
+      setNickname(saved);
+      setHasSavedNick(true);
+    }
+  }, []);
 
   if (!authLoading && user) {
     return <Navigate to={fromState || '/'} replace />;
   }
 
+  const handleClearSavedNick = () => {
+    clearLastNick();
+    setNickname('');
+    setHasSavedNick(false);
+    setPin('');
+    setErrorMsg(null);
+  };
+
+  const handlePinChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const raw = e.target.value.replace(/\D/g, '').slice(0, 4);
+    setPin(raw);
+    setErrorMsg(null);
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
-    setSignupEmailSent(false);
 
-    const trimmedEmail = email.trim();
-    const trimmedName = displayName.trim();
-
-    if (mode === 'signup' && trimmedName.length < 2) {
-      setErrorMsg('Informe um nome de exibição com pelo menos 2 caracteres.');
+    const trimmedNick = nickname.trim();
+    if (trimmedNick.length < 3 || trimmedNick.length > 20) {
+      setErrorMsg('O apelido precisa ter entre 3 e 20 caracteres.');
       return;
     }
 
-    if (!trimmedEmail || !password) {
-      setErrorMsg('Preencha e-mail e senha.');
+    const slug = nicknameToSlug(trimmedNick);
+    if (!slug || slug.length < 3) {
+      setErrorMsg('O apelido deve conter pelo menos 3 letras ou números válidos.');
       return;
     }
+
+    if (pin.length !== 4) {
+      setErrorMsg('Digite um PIN de 4 números.');
+      pinInputRef.current?.focus();
+      return;
+    }
+
+    const email = slugToEmail(slug);
+    const password = pinToPassword(pin);
 
     setSubmitting(true);
     try {
       if (mode === 'login') {
         const { error } = await supabase.auth.signInWithPassword({
-          email: trimmedEmail,
+          email,
           password,
         });
+
         if (error) {
           setErrorMsg(translateAuthError(error.message));
           return;
         }
-        showToast('Bem-vindo de volta!', 'success');
+
+        setLastNick(trimmedNick);
+        showToast(`Bem-vindo, ${trimmedNick}!`, 'success');
         navigate(fromState || '/', { replace: true });
       } else {
         const { data, error } = await supabase.auth.signUp({
-          email: trimmedEmail,
+          email,
           password,
           options: {
             data: {
-              display_name: trimmedName,
+              display_name: trimmedNick,
             },
           },
         });
@@ -98,12 +135,28 @@ export function Auth() {
           return;
         }
 
+        // Se a conta já tiver sido autenticada automaticamente:
         if (data.session) {
-          showToast('Conta criada com sucesso!', 'success');
+          setLastNick(trimmedNick);
+          showToast(`Acesso criado com sucesso!`, 'success');
           navigate(fromState || '/', { replace: true });
         } else {
-          setSignupEmailSent(true);
-          showToast('Cadastro realizado! Verifique seu e-mail.', 'success');
+          // Caso confirmação seja requerida ou não venha sessão, tenta logar diretamente:
+          const { error: loginError } = await supabase.auth.signInWithPassword({
+            email,
+            password,
+          });
+
+          if (loginError) {
+            setErrorMsg(
+              'Acesso criado! Tente entrar com seu apelido e PIN agora.'
+            );
+            setMode('login');
+          } else {
+            setLastNick(trimmedNick);
+            showToast(`Acesso criado com sucesso!`, 'success');
+            navigate(fromState || '/', { replace: true });
+          }
         }
       }
     } finally {
@@ -133,7 +186,6 @@ export function Auth() {
               onClick={() => {
                 setMode('login');
                 setErrorMsg(null);
-                setSignupEmailSent(false);
               }}
               className={`min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
                 mode === 'login'
@@ -148,7 +200,6 @@ export function Auth() {
               onClick={() => {
                 setMode('signup');
                 setErrorMsg(null);
-                setSignupEmailSent(false);
               }}
               className={`min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
                 mode === 'signup'
@@ -156,22 +207,9 @@ export function Auth() {
                   : 'text-zinc-400 hover:text-zinc-200'
               }`}
             >
-              Criar conta
+              Criar acesso
             </button>
           </div>
-
-          {signupEmailSent && (
-            <div className="mb-4 flex items-start gap-3 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3.5 text-sm text-emerald-200">
-              <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
-              <div>
-                <p className="font-medium">Confirme seu e-mail</p>
-                <p className="mt-0.5 text-xs text-emerald-300/90">
-                  Enviamos um link de confirmação para <strong>{email}</strong>.
-                  Após confirmar, faça login abaixo.
-                </p>
-              </div>
-            </div>
-          )}
 
           {errorMsg && (
             <div className="mb-4 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3.5 py-2.5 text-sm text-rose-200">
@@ -180,76 +218,136 @@ export function Auth() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'signup' && (
-              <div>
-                <label
-                  htmlFor="auth-display-name"
-                  className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400"
-                >
-                  Nome de exibição
-                </label>
-                <input
-                  id="auth-display-name"
-                  type="text"
-                  required
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  placeholder="Como o grupo vai te ver"
-                  autoComplete="name"
-                  className="min-h-[46px] w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition-colors focus:border-emerald-500"
-                />
-              </div>
-            )}
-
             <div>
-              <label
-                htmlFor="auth-email"
-                className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400"
-              >
-                E-mail
-              </label>
+              <div className="mb-1.5 flex items-center justify-between">
+                <label
+                  htmlFor="auth-nickname"
+                  className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-zinc-400"
+                >
+                  <User className="h-3.5 w-3.5 text-emerald-400" />
+                  Apelido
+                </label>
+                {hasSavedNick && mode === 'login' && (
+                  <button
+                    type="button"
+                    onClick={handleClearSavedNick}
+                    className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-rose-400 transition-colors"
+                  >
+                    <XCircle className="h-3 w-3" />
+                    Trocar conta
+                  </button>
+                )}
+              </div>
               <input
-                id="auth-email"
-                type="email"
+                id="auth-nickname"
+                type="text"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="voce@exemplo.com"
-                autoComplete="email"
-                inputMode="email"
-                className="min-h-[46px] w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition-colors focus:border-emerald-500"
+                minLength={3}
+                maxLength={20}
+                value={nickname}
+                onChange={(e) => {
+                  setNickname(e.target.value);
+                  setErrorMsg(null);
+                }}
+                placeholder="Ex.: Rafa, Amanda, Dutra"
+                autoComplete="username"
+                className="min-h-[46px] w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 text-sm font-medium text-zinc-100 placeholder-zinc-500 outline-none transition-colors focus:border-emerald-500"
               />
+              <p className="mt-1 text-[11px] text-zinc-500">
+                {mode === 'signup'
+                  ? '3 a 20 caracteres. Este será seu nome nos grupos.'
+                  : 'Digite o mesmo apelido criado anteriormente.'}
+              </p>
             </div>
 
             <div>
-              <label
-                htmlFor="auth-password"
-                className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-zinc-400"
+              <div className="mb-1.5 flex items-center justify-between">
+                <label
+                  htmlFor="auth-pin"
+                  className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-zinc-400"
+                >
+                  <KeyRound className="h-3.5 w-3.5 text-emerald-400" />
+                  PIN (4 dígitos)
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowPin((prev) => !prev)}
+                  className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors"
+                >
+                  {showPin ? (
+                    <>
+                      <EyeOff className="h-3.5 w-3.5" />
+                      Ocultar PIN
+                    </>
+                  ) : (
+                    <>
+                      <Eye className="h-3.5 w-3.5" />
+                      Mostrar PIN
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Display de 4 caixas com input sobreposto */}
+              <div
+                onClick={() => pinInputRef.current?.focus()}
+                className="relative flex cursor-pointer justify-center gap-3 py-1"
               >
-                Senha
-              </label>
-              <input
-                id="auth-password"
-                type="password"
-                required
-                minLength={6}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Mínimo 6 caracteres"
-                autoComplete={
-                  mode === 'login' ? 'current-password' : 'new-password'
-                }
-                className="min-h-[46px] w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 text-sm text-zinc-100 placeholder-zinc-500 outline-none transition-colors focus:border-emerald-500"
-              />
+                <input
+                  ref={pinInputRef}
+                  id="auth-pin"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  maxLength={4}
+                  autoComplete="one-time-code"
+                  value={pin}
+                  onChange={handlePinChange}
+                  className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+                  aria-label="PIN de 4 dígitos"
+                />
+
+                {[0, 1, 2, 3].map((index) => {
+                  const digit = pin[index];
+                  const isCurrent = pin.length === index;
+
+                  return (
+                    <div
+                      key={index}
+                      className={`flex h-14 w-14 items-center justify-center rounded-2xl border-2 text-xl font-bold transition-all ${
+                        digit
+                          ? 'border-emerald-500/70 bg-emerald-500/10 text-emerald-300 shadow-sm'
+                          : isCurrent
+                          ? 'border-emerald-500 bg-zinc-950 shadow-md shadow-emerald-500/20'
+                          : 'border-zinc-800 bg-zinc-950 text-zinc-600'
+                      }`}
+                    >
+                      {digit ? (
+                        showPin ? (
+                          digit
+                        ) : (
+                          <span className="h-3 w-3 rounded-full bg-emerald-400" />
+                        )
+                      ) : (
+                        <span className="h-1.5 w-1.5 rounded-full bg-zinc-700" />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p className="mt-1.5 text-center text-[11px] text-zinc-500">
+                Toque nos quadros para digitar seu código numérico de 4 dígitos.
+              </p>
             </div>
 
             <button
               type="submit"
-              disabled={submitting}
-              className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 font-semibold text-zinc-950 transition-colors hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={submitting || pin.length !== 4 || nickname.trim().length < 3}
+              className="mt-2 flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 font-semibold text-zinc-950 transition-colors hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-              {mode === 'login' ? 'Entrar' : 'Cadastrar'}
+              {mode === 'login' ? 'Entrar' : 'Criar acesso'}
             </button>
           </form>
         </div>

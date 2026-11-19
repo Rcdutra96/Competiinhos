@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { cookieStorage } from './authStorage';
 
 const rawUrl = import.meta.env.VITE_SUPABASE_URL;
 const rawAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -27,7 +28,9 @@ export const supabase = createClient(
     auth: {
       persistSession: isSupabaseConfigured,
       autoRefreshToken: isSupabaseConfigured,
-      detectSessionInUrl: isSupabaseConfigured,
+      detectSessionInUrl: false,
+      storageKey: 'competiinhos-auth',
+      storage: cookieStorage,
     },
   }
 );
